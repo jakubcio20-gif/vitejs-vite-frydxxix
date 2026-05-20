@@ -1,7 +1,7 @@
 import { supabase } from '../supabase'
 
-export async function usernameToEmail(username) {
-  // Zamiast @beatquiz.pl używamy hash który wygląda jak prawdziwy email
+export default function usernameToEmail(username) {
+  if (!username) return ''; // Zabezpieczenie przed crashowaniem
   const encoded = btoa(username.toLowerCase()).replace(/[^a-z0-9]/gi, '').substring(0, 20)
   return `u${encoded}@bq-internal.com`
 }
@@ -53,16 +53,25 @@ export async function logout() {
 }
 
 export async function getCurrentUser() {
-  const { data } = await supabase.auth.getUser()
-  if (!data.user) return null
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', data.user.id)
-    .single()
-  // Jeśli zalogowany przez Google ale nie ma jeszcze nazwy
-  if (!profile) return { id: data.user.id, needsUsername: true, email: data.user.email }
-  return profile
+  try {
+    const { data: authData, error: authError } = await supabase.auth.getUser()
+    if (authError || !authData?.user) return null
+
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', authData.user.id)
+      .maybeSingle() // Użyj maybeSingle zamiast single, żeby nie rzucało błędem gdy nie ma rekordu
+
+    if (profileError || !profile) {
+      return { id: authData.user.id, needsUsername: true, email: authData.user.email }
+    }
+    
+    return profile
+  } catch (err) {
+    console.error("Błąd w getCurrentUser:", err)
+    return null
+  }
 }
 
 export async function setUsername(userId, username) {
