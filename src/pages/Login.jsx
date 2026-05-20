@@ -1,6 +1,6 @@
 import { supabase } from '../supabase'
 
-function usernameToEmail(username) {
+export default function usernameToEmail(username) {
   // Zamiast @beatquiz.pl używamy hash który wygląda jak prawdziwy email
   const encoded = btoa(username.toLowerCase()).replace(/[^a-z0-9]/gi, '').substring(0, 20)
   return `u${encoded}@bq-internal.com`
