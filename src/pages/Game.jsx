@@ -29,9 +29,12 @@ export default function Game({ user }) {
   const phaseRef = useRef(phase)
   const attemptRef = useRef(attempt)
   const roomRef = useRef(room)
+  const timeLeftRef = useRef(timeLeft) // Ref do śledzenia czasu przy powtórkach
+  
   phaseRef.current = phase
   attemptRef.current = attempt
   roomRef.current = room
+  timeLeftRef.current = timeLeft
 
   // YouTube player refs
   const ytPlayerRef = useRef(null)
@@ -59,7 +62,6 @@ export default function Game({ user }) {
         try { r = await joinRoom(code, playerName) } catch { navigate('/'); return }
       }
       setRoom(r)
-      // Host waits in lobby, guest joining triggers start
       if (role === 'host') setPhase('lobby')
       else setPhase('lobby')
     }
@@ -74,12 +76,10 @@ export default function Game({ user }) {
           const newRoom = payload.new
           setRoom(newRoom)
 
-          // Guest joined — both can start
           if (newRoom.guest_name && roomRef.current && !roomRef.current.guest_name) {
             setPhase('lobby')
           }
 
-          // Round advanced
           if (roomRef.current && newRoom.current_round > roomRef.current.current_round) {
             setMyTurnDone(false)
             setAttempt(0)
@@ -104,23 +104,51 @@ export default function Game({ user }) {
   const createYTPlayer = useCallback((song, attemptIndex, onEndCallback) => {
     if (!song?.youtubeId) { onEndCallback(); return }
     if (ytPlayerRef.current) {
-      ytPlayerRef.current.destroy()
+      try {
+        ytPlayerRef.current.destroy()
+      } catch (e) {
+        console.log("Player destroy error", e)
+      }
       ytPlayerRef.current = null
     }
     const duration = ATTEMPT_DURATIONS[attemptIndex]
     const startSec = song.youtubeStart || 30
 
+    // Używamy standardowych wymiarów dla iframe, ale ukryjemy cały kontener w CSS, 
+    // dzięki czemu YT nie zablokuje odtwarzania w tle.
     ytPlayerRef.current = new window.YT.Player(ytContainerRef.current, {
-      height: '1',
-      width: '1',
+      height: '200',
+      width: '200',
       videoId: song.youtubeId,
-      playerVars: { start: startSec, autoplay: 1, controls: 0, disablekb: 1, fs: 0, modestbranding: 1 },
+      playerVars: { 
+        start: startSec, 
+        autoplay: 1, 
+        controls: 0, 
+        disablekb: 1, 
+        fs: 0, 
+        modestbranding: 1,
+        playsinline: 1
+      },
       events: {
         onReady: (e) => {
-          e.target.setVolume(80)
+          e.target.setVolume(100)
           e.target.playVideo()
+          
+          // Bezpieczny fallback na wypadek, gdyby przeglądarka zablokowała un-muted autoplay
+          const playPromise = e.target.playVideo()
+          if (playPromise !== undefined) {
+            playPromise.catch(() => {
+              // Jeśli przeglądarka zablokuje, musimy wyciszyć dźwięk, żeby w ogóle ruszyło,
+              // ale w grze muzycznej to problem, więc interakcja przed startem (kliknięcie w przycisk) jest kluczowa.
+              e.target.mute()
+              e.target.playVideo()
+            })
+          }
+
           setTimeout(() => {
-            e.target.pauseVideo()
+            if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === 'function') {
+              ytPlayerRef.current.pauseVideo()
+            }
             onEndCallback()
           }, duration * 1000)
         }
@@ -135,7 +163,6 @@ export default function Game({ user }) {
     setCanReplay(false)
 
     if (!ytReadyRef.current || !song.youtubeId) {
-      // Brak YouTube — od razu do answering
       startAnswerPhase()
       return
     }
@@ -154,8 +181,8 @@ export default function Game({ user }) {
 
     createYTPlayer(currentSong, attemptRef.current, () => {
       setCanReplay(true)
-      // Restart answer phase fresh after replay
-      startAnswerPhase()
+      // WZNAWIAMY odliczanie zamiast startować od nowa
+      resumeAnswerPhase()
     })
   }, [canReplay, currentSong, createYTPlayer])
 
@@ -163,6 +190,18 @@ export default function Game({ user }) {
     setPhase('answering')
     setAnswerStartTime(Date.now())
     setTimeLeft(ANSWER_TIME)
+    runTimer()
+  }
+
+  // Nowa funkcja odpowiadająca za kontynuację timera po powtórce snippetu
+  const resumeAnswerPhase = () => {
+    setPhase('answering')
+    // Korygujemy czas rozpoczęcia, aby kalkulacja punktów uwzględniała rzeczywisty czas namysłu
+    setAnswerStartTime(Date.now() - (ANSWER_TIME - timeLeftRef.current) * 1000)
+    runTimer()
+  }
+
+  const runTimer = () => {
     clearInterval(timerRef.current)
     timerRef.current = setInterval(() => {
       setTimeLeft(prev => {
@@ -199,14 +238,9 @@ export default function Game({ user }) {
       setRoundPoints(pts)
       submitResult(pts, attemptRef.current, timeSpent, true)
     } else if (result === 'title_only' || result === 'artist_only') {
-      // Podpowiedź — restart timera
+      // Przy częściowym dopasowaniu przywracamy pełny czas rundy (zgodnie z Twoim oryginalnym zamysłem)
       setTimeLeft(ANSWER_TIME)
-      timerRef.current = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) { clearInterval(timerRef.current); handleTimeout(); return 0 }
-          return prev - 1
-        })
-      }, 1000)
+      runTimer()
     } else {
       const curAttempt = attemptRef.current
       if (curAttempt < ATTEMPT_DURATIONS.length - 1) {
@@ -248,8 +282,13 @@ export default function Game({ user }) {
 
   return (
     <div style={{ maxWidth: 700, margin: '0 auto', padding: '32px 24px' }}>
-      {/* Hidden YouTube container */}
-      <div style={{ position: 'fixed', top: -10, left: -10, width: 1, height: 1, overflow: 'hidden', opacity: 0 }}>
+      
+      {/* 
+        POPRAWKA POD ODTWARZANIE YT:
+        Zamiast width: 1, height: 1, opacity: 0 — dajemy normalne wymiary playerowi,
+        ale cały kontener wyrzucamy absolutnie daleko poza widoczny ekran.
+      */}
+      <div style={{ position: 'absolute', top: '-9999px', left: '-9999px', width: '300px', height: '300px', overflow: 'hidden' }}>
         <div ref={ytContainerRef} />
       </div>
 
@@ -293,7 +332,7 @@ export default function Game({ user }) {
       {/* Main area */}
       <div className="card" style={{ padding: 32, textAlign: 'center', minHeight: 280, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
 
-        {/* LOBBY — czekanie na gracza */}
+        {/* LOBBY */}
         {phase === 'lobby' && (
           <div className="fade-in">
             {!bothReady ? (
@@ -319,6 +358,9 @@ export default function Game({ user }) {
                 <div style={{ fontFamily: 'DM Mono', fontSize: 13, color: '#8888aa', marginBottom: 28 }}>
                   Kategoria: {cat?.emoji} {cat?.label}
                 </div>
+                {/* 
+                  Ta interakcja (kliknięcie) jest kluczowa dla odblokowania Audio w przeglądarce Hostia!
+                */}
                 <button className="btn btn-primary" style={{ fontSize: 18, padding: '16px 48px' }} onClick={handleStartGame}>
                   ▶ ZACZYNAM GRĘ
                 </button>
